@@ -12,48 +12,66 @@
 
 #include <random>
 
-GLuint hexapod_meshes_for_lit_color_texture_program = 0;
-Load< MeshBuffer > hexapod_meshes(LoadTagDefault, []() -> MeshBuffer const * {
-	MeshBuffer const *ret = new MeshBuffer(data_path("hexapod.pnct"));
-	hexapod_meshes_for_lit_color_texture_program = ret->make_vao_for_program(lit_color_texture_program->program);
+GLuint fan_meshes_for_lit_color_texture_program = 0;
+Load< MeshBuffer > fan_meshes(LoadTagDefault, []() -> MeshBuffer const * {
+	MeshBuffer const *ret = new MeshBuffer(data_path("fan_output.pnct"));
+	fan_meshes_for_lit_color_texture_program = ret->make_vao_for_program(lit_color_texture_program->program);
 	return ret;
 });
 
-Load< Scene > hexapod_scene(LoadTagDefault, []() -> Scene const * {
-	return new Scene(data_path("hexapod.scene"), [&](Scene &scene, Scene::Transform *transform, std::string const &mesh_name){
-		Mesh const &mesh = hexapod_meshes->lookup(mesh_name);
+Load< Scene > fan_scene(LoadTagDefault, []() -> Scene const * {
+	return new Scene(data_path("fan_output.scene"), [&](Scene &scene, Scene::Transform *transform, std::string const &mesh_name){
+		Mesh const &mesh = fan_meshes->lookup(mesh_name);
 
 		scene.drawables.emplace_back(transform);
 		Scene::Drawable &drawable = scene.drawables.back();
 
 		drawable.pipeline = lit_color_texture_program_pipeline;
 
-		drawable.pipeline.vao = hexapod_meshes_for_lit_color_texture_program;
+		drawable.pipeline.vao = fan_meshes_for_lit_color_texture_program;
 		drawable.pipeline.type = mesh.type;
 		drawable.pipeline.start = mesh.start;
 		drawable.pipeline.count = mesh.count;
-
 	});
 });
 
-PlayMode::PlayMode() : scene(*hexapod_scene) {
-	//get pointers to leg for convenience:
+PlayMode::PlayMode() : scene(*fan_scene) {
 	for (auto &transform : scene.transforms) {
-		if (transform.name == "Hip.FL") hip = &transform;
-		else if (transform.name == "UpperLeg.FL") upper_leg = &transform;
-		else if (transform.name == "LowerLeg.FL") lower_leg = &transform;
+		if (transform.name == "Cup") cup = &transform;
+		else if (transform.name == "Fan") fan = &transform;
+		else if (transform.name == "Plane") plane_1 = &transform;
+		else if (transform.name == "Coin_1") coin_1 = &transform;
+		else if (transform.name == "Coin_2") coin_2 = &transform;
+		else if (transform.name == "Coin_3") coin_3 = &transform;
 	}
-	if (hip == nullptr) throw std::runtime_error("Hip not found.");
-	if (upper_leg == nullptr) throw std::runtime_error("Upper leg not found.");
-	if (lower_leg == nullptr) throw std::runtime_error("Lower leg not found.");
+	if (cup == nullptr) throw std::runtime_error("cup not found.");
+	if (fan == nullptr) throw std::runtime_error("fan not found.");
+	if (plane_1 == nullptr) throw std::runtime_error("plane not found.");
+	if (coin_1 == nullptr) throw std::runtime_error("coin_1 not found.");
+	if (coin_2 == nullptr) throw std::runtime_error("coin_2 not found.");
+	if (coin_3 == nullptr) throw std::runtime_error("coin_3 not found.");
+	
+	
+	coin_base_rotation = coin_1->rotation;
+	coins.emplace_back(coin_1);
+	coins.emplace_back(coin_2);
+	coins.emplace_back(coin_3);
+	SpawnCoins();
 
-	hip_base_rotation = hip->rotation;
-	upper_leg_base_rotation = upper_leg->rotation;
-	lower_leg_base_rotation = lower_leg->rotation;
+	plane_starting_position = glm::vec3(-150.0f, 0.0f, 50.0f);
+	plane_1->position = plane_starting_position;
+
+	cup->position.z += 50.0f;
+	fan_base_rotation = fan->rotation;
+	plane_1_base_rotation = plane_1->rotation;
 
 	//get pointer to camera for convenience:
 	if (scene.cameras.size() != 1) throw std::runtime_error("Expecting scene to have exactly one camera, but it has " + std::to_string(scene.cameras.size()));
 	camera = &scene.cameras.front();
+
+	static glm::vec3 camera_offset = glm::vec3(0.0f, -300.0f, 200.0f); // Adjust these values for desired position
+	camera->transform->position = camera_offset;
+	camera->transform->rotation = glm::quatLookAt(glm::normalize(cup->position - camera->transform->position), glm::vec3(0.0f, 0.0f, 1.0f));
 }
 
 PlayMode::~PlayMode() {
@@ -81,7 +99,11 @@ bool PlayMode::handle_event(SDL_Event const &evt, glm::uvec2 const &window_size)
 			down.downs += 1;
 			down.pressed = true;
 			return true;
-		}
+		} else if(evt.key.keysym.sym == SDLK_SPACE){
+			space.downs += 1;
+			space.pressed = true;
+		} 
+		
 	} else if (evt.type == SDL_KEYUP) {
 		if (evt.key.keysym.sym == SDLK_a) {
 			left.pressed = false;
@@ -95,8 +117,15 @@ bool PlayMode::handle_event(SDL_Event const &evt, glm::uvec2 const &window_size)
 		} else if (evt.key.keysym.sym == SDLK_s) {
 			down.pressed = false;
 			return true;
+		} else if (evt.key.keysym.sym == SDLK_SPACE) {
+			space.pressed = false;
+			return true;
 		}
-	} else if (evt.type == SDL_MOUSEBUTTONDOWN) {
+
+	} 
+
+	/*
+	else if (evt.type == SDL_MOUSEBUTTONDOWN) {
 		if (SDL_GetRelativeMouseMode() == SDL_FALSE) {
 			SDL_SetRelativeMouseMode(SDL_TRUE);
 			return true;
@@ -115,49 +144,138 @@ bool PlayMode::handle_event(SDL_Event const &evt, glm::uvec2 const &window_size)
 			return true;
 		}
 	}
+	*/
 
 	return false;
 }
 
+void PlayMode::SpawnCoins() {
+    // random position generation
+    std::random_device rd;                 
+    std::mt19937 gen(rd());              
+	float prev_x = -80.0f;   
+	std::uniform_real_distribution<float> dis_z(20.0f, 110.0f);
+	
+    // iterate over each coin and set a random position
+    for (Scene::Transform* coin : coins) {
+		coin_collected[coin] = false;
+		std::uniform_real_distribution<float> dis_x(prev_x, prev_x + 60.0f); 
+   		
+		coin->scale = glm::vec3(1.0f, 1.0f, 1.0f);
+        coin->position.x = dis_x(gen);
+        coin->position.z = dis_z(gen);
+
+		prev_x = prev_x + 90.0f;
+    }
+}
+
+void PlayMode::CheckCoinCollision() {
+	for (Scene::Transform* coin : coins) {
+		if(coin_collected[coin] == false){
+			if(plane_1->position.x > coin->position.x - 3.0f && plane_1->position.x < coin->position.x + 3.0f){
+				if(plane_1->position.z > coin->position.z - 5.0f && plane_1->position.z < coin->position.z + 5.0f){
+					coin->scale = glm::vec3(0.0f, 0.0f, 0.0f);
+					score += 1;
+					coin_collected[coin] = true;
+				}
+			}
+		}
+	}
+}
+
+
 void PlayMode::update(float elapsed) {
 
-	//slowly rotates through [0,1):
-	wobble += elapsed / 10.0f;
-	wobble -= std::floor(wobble);
+    // increment a continuous rotation angle based on elapsed time:
+    static float rotation_speed = 360.0f;
+	static float rotation_acceleration = 60.0f;
+    static float rotation_angle = 0.0f;
 
-	hip->rotation = hip_base_rotation * glm::angleAxis(
-		glm::radians(5.0f * std::sin(wobble * 2.0f * float(M_PI))),
-		glm::vec3(0.0f, 1.0f, 0.0f)
-	);
-	upper_leg->rotation = upper_leg_base_rotation * glm::angleAxis(
-		glm::radians(7.0f * std::sin(wobble * 2.0f * 2.0f * float(M_PI))),
-		glm::vec3(0.0f, 0.0f, 1.0f)
-	);
-	lower_leg->rotation = lower_leg_base_rotation * glm::angleAxis(
-		glm::radians(10.0f * std::sin(wobble * 3.0f * 2.0f * float(M_PI))),
-		glm::vec3(0.0f, 0.0f, 1.0f)
-	);
+    // update the rotation angle
+    rotation_angle += rotation_speed * elapsed;
+    rotation_angle = fmod(rotation_angle, 360.0f);
 
-	//move camera:
+    fan->rotation = fan_base_rotation * glm::angleAxis(
+        glm::radians(rotation_angle),
+        glm::vec3(0.0f, 0.0f, 1.0f) 
+    );
+
+	//cup movement
 	{
-
-		//combine inputs into a move:
-		constexpr float PlayerSpeed = 30.0f;
+		constexpr float PlayerSpeed = 60.0f;
 		glm::vec2 move = glm::vec2(0.0f);
-		if (left.pressed && !right.pressed) move.x =-1.0f;
+		if (left.pressed && !right.pressed) move.x = -1.0f;
 		if (!left.pressed && right.pressed) move.x = 1.0f;
-		if (down.pressed && !up.pressed) move.y =-1.0f;
-		if (!down.pressed && up.pressed) move.y = 1.0f;
 
-		//make it so that moving diagonally doesn't go faster:
+		if (space.pressed && rotation_speed <= 1080.0f) rotation_speed += rotation_acceleration;
+		if (!space.pressed && rotation_speed >= 180.0f) rotation_speed -= rotation_acceleration;
+
 		if (move != glm::vec2(0.0f)) move = glm::normalize(move) * PlayerSpeed * elapsed;
-
 		glm::mat4x3 frame = camera->transform->make_local_to_parent();
 		glm::vec3 frame_right = frame[0];
-		//glm::vec3 up = frame[1];
-		glm::vec3 frame_forward = -frame[2];
 
-		camera->transform->position += move.x * frame_right + move.y * frame_forward;
+		frame_right.z = 0.0f;
+
+		frame_right = glm::normalize(frame_right);
+
+		cup->position += move.x * frame_right;
+		cup->position.z = 0.0f;
+	}
+
+	//plane movement
+	plane_1->position.x += 0.5f;
+	{	
+		static float max_tilt_angle = 30.0f; 
+    	static float current_tilt_angle = 0.0f; 
+		glm::quat tilt_rotation = glm::angleAxis(glm::radians(current_tilt_angle), glm::vec3(0.0f, 1.0f, 0.0f)); 
+		if(space.pressed && plane_1->position.z < 120.0f){
+			if(cup->position.x >= plane_1->position.x - 10.0f && 
+				cup->position.x <= plane_1->position.x + 10.0f){
+				plane_1->position.z += 0.003f * (rotation_speed - 360.0f);
+				current_tilt_angle = std::max(current_tilt_angle - 3.0f, -max_tilt_angle);
+				plane_1->rotation = tilt_rotation * plane_1_base_rotation;
+			}
+		}
+		else if(!space.pressed && plane_1->position.z > 20.0f){
+			plane_1->position.z -= 0.2f;
+			current_tilt_angle = std::min(current_tilt_angle + 5.0f, max_tilt_angle);
+			plane_1->rotation = tilt_rotation * plane_1_base_rotation;
+		}
+
+		else{
+			current_tilt_angle = std::max(current_tilt_angle - 3.0f, 0.0f);
+			plane_1->rotation = tilt_rotation * plane_1_base_rotation;
+		}
+	}
+
+	//coin rotations
+	{
+		static float rotation_speed = 90.0f;
+    	static float rotation_angle = 0.0f;
+
+		rotation_angle += rotation_speed * elapsed;
+		rotation_angle = fmod(rotation_angle, 360.0f);
+
+		for(Scene::Transform *coin : coins){
+			
+			coin->rotation = coin_base_rotation * glm::angleAxis(
+       		glm::radians(rotation_angle),
+        	glm::vec3(0.0f, 1.0f, 0.0f) 
+			);
+		}
+	}
+
+	//coin collision and update score
+	{
+		CheckCoinCollision();
+	}
+
+	//plane reset and coin respawn
+	if(plane_1->position.x > 150.0f){
+			plane_1->rotation = plane_1_base_rotation;
+			plane_1->position = plane_starting_position;
+			cup->position.x = 0.0f;	
+			SpawnCoins();
 	}
 
 	//reset button press counters:
@@ -200,13 +318,14 @@ void PlayMode::draw(glm::uvec2 const &drawable_size) {
 			0.0f, 0.0f, 0.0f, 1.0f
 		));
 
+		std::string score_text = "Score: " + std::to_string(score);
 		constexpr float H = 0.09f;
-		lines.draw_text("Mouse motion rotates camera; WASD moves; escape ungrabs mouse",
+		lines.draw_text(score_text,
 			glm::vec3(-aspect + 0.1f * H, -1.0 + 0.1f * H, 0.0),
 			glm::vec3(H, 0.0f, 0.0f), glm::vec3(0.0f, H, 0.0f),
 			glm::u8vec4(0x00, 0x00, 0x00, 0x00));
 		float ofs = 2.0f / drawable_size.y;
-		lines.draw_text("Mouse motion rotates camera; WASD moves; escape ungrabs mouse",
+		lines.draw_text(score_text,
 			glm::vec3(-aspect + 0.1f * H + ofs, -1.0 + 0.1f * H + ofs, 0.0),
 			glm::vec3(H, 0.0f, 0.0f), glm::vec3(0.0f, H, 0.0f),
 			glm::u8vec4(0xff, 0xff, 0xff, 0x00));
